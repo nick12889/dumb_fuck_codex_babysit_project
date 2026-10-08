@@ -1,0 +1,6 @@
+name = "aileen-dental-demo"
+compatibility_date = "2026-10-08"
+
+[assets]
+directory = "."
+run_worker_first = false

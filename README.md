@@ -1,22 +1,25 @@
 # Aileen dental demo
 
-A standalone, browser-based walkthrough of the NC AI dental patient-access offer.
+Standalone dental front-desk demo with scripted text chat, browser voice, callback and appointment requests, and email delivery through AgentMail. It does not use a database or CRM and does not place phone calls or book a real calendar appointment.
 
-## Run locally
+## Email setup
 
-Open `index.html` in a modern browser. Browser voice requires browser support and microphone permission. If voice is unavailable, the text-chat demo still works.
+Add these as **Worker secrets/variables in Cloudflare**. Never commit their values to GitHub.
 
-## Demo behavior
+- `AGENTMAIL_API_KEY` — AgentMail API key with permission to send from the chosen inbox.
+- `AGENTMAIL_INBOX_ID` — the inbox ID shown by AgentMail.
+- `OWNER_EMAIL` — the address that receives practice notifications and conversation summaries.
 
-- Collects practice contact details before opening the walkthrough.
-- Demonstrates scripted dental chat, native browser voice with start/stop and transcript, callback requests, direct appointment requests, and three proposed times (A/B/C).
-- Restricts sample booking times to 10:00–18:00.
-- Generates visible practice and patient email drafts. “Open email draft” opens a `mailto:` draft in the visitor’s email application; it does not send mail by itself.
-- Shows activity and email drafts in the owner-side demo panel. Data remains in page memory only and disappears on reload.
-- Describes the four commercial packages. Package cards are offer descriptions, not proof that every production capability is connected.
+The demo asks users to consent before unlocking. Callback and booking actions send notifications to `OWNER_EMAIL`, the entered practice email, and the patient confirmation address. The summary button sends the conversation summary to `OWNER_EMAIL` and the practice contact. The page reports send status.
 
-## Explicit demo limits
+## Deploy
 
-This demo does not use a database, Cloudflare D1, CRM, external email API, live calendar, telephone provider, or paid AI service. It does not send messages, book a real appointment, place a callback, or save activity across browser sessions. Generated email drafts are clearly labelled as drafts. Do not enter real patient or clinical information.
+The Worker serves the repository's static files; `/api/*` requests are handled by `worker.js`. Configure the three email secrets on the Cloudflare Worker named `dumb-fuck-codex-babysit-project` before testing delivery.
 
-For deployment as a static Cloudflare Worker asset, review `wrangler.toml` and run Wrangler from this directory with the appropriate account access. Deploy only this separate demo. Do not point it at or modify the live NC AI site or worker.
+## Limits
+
+- No database, CRM, local storage, or persistent conversation history.
+- Appointment times are limited to 10:00–18:00, but availability is not checked and no appointment is booked.
+- Callback requests send email only; no phone call is placed.
+- Browser voice depends on microphone permission and browser support.
+- The demo sends real emails only after the visitor checks the consent box and submits an email action. Do not enter real clinical information.

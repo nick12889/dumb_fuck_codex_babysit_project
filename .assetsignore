@@ -1,4 +1,3 @@
-worker.js
-wrangler.toml
-README.md
-.assetsignore
+*
+!index.html
+!app.js

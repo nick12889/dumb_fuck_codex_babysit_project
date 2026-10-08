@@ -3,6 +3,10 @@ const $$ = (s) => document.querySelectorAll(s);
 let lead = null;
 const messages = $('#messages');
 const conversation = [];
+let finished = false;
+let channel = 'text';
+let voiceEnding = false;
+const summaryCursor = {text: 0, voice: 0};
 
 function toast(text) {
   const node = $('#toast');
@@ -21,7 +25,7 @@ function addMsg(text, who) {
   const node = document.createElement('div'); node.className = `msg ${who === 'you' ? 'you' : ''}`;
   const label = document.createElement('div'); label.className = 'who'; label.textContent = who === 'you' ? 'YOU' : 'AILEEN';
   node.append(label, document.createTextNode(text)); messages.append(node); messages.scrollTop = messages.scrollHeight;
-  conversation.push({ who: who === 'you' ? 'Visitor' : 'Aileen', text });
+  conversation.push({ who: who === 'you' ? 'Visitor' : 'Aileen', text, channel });
 }
 function reply(question) {
   const q = question.toLowerCase();
@@ -40,7 +44,7 @@ async function sendEmail(kind, data, statusNode) {
     if (!response.ok) throw new Error(result.error || 'Email could not be sent.');
     statusNode.textContent = result.partial ? `Partially sent: ${result.sent} of ${result.total} email messages. Check the AgentMail inbox.` : `AgentMail accepted email for ${result.sent} recipient${result.sent === 1 ? '' : 's'}.`;
     activity('Email accepted by AgentMail', `${kind} · ${new Date().toLocaleTimeString()}`);
-    return true;
+    return !result.partial;
   } catch (error) {
     statusNode.textContent = error.message || 'Email could not be sent.';
     activity('Email not sent', 'Check Worker email settings');
@@ -49,9 +53,10 @@ async function sendEmail(kind, data, statusNode) {
 }
 $('#leadForm').addEventListener('submit', (event) => {
   event.preventDefault();
-  lead = { name: $('#name').value.trim(), business: $('#business').value.trim(), email: $('#email').value.trim(), phone: $('#phone').value.trim(), consent: $('#emailConsent').checked };
-  $('#gateStatus').textContent = `Demo unlocked for ${lead.business}. Use the email actions to send a message.`;
-  $('#callbackPhone').value = lead.phone; $('#callbackEmail').value = lead.email; $('#patientEmail').value = lead.email;
+  lead = { name: $('#name').value.trim(), business: $('#business').value.trim(), email: $('#email').value.trim(), phone: $('#phone').value.trim(), customerEmail: $('#customerEmail').value.trim(), consent: $('#emailConsent').checked };
+  $('#gateStatus').textContent = `Demo unlocked for ${lead.business}. Play the customer. Chat endings, bookings and the final demo summary each send three emails.`;
+  $('#callbackPhone').value = lead.phone; $('#callbackEmail').value = lead.customerEmail; $('#patientEmail').value = lead.customerEmail;
+  finished = false; conversation.length = 0; summaryCursor.text = 0; summaryCursor.voice = 0; $('#summaryDraftButton').disabled = false; $('#summaryDraftButton').textContent = 'Finish demo & email all three';
   const greeting = messages.firstElementChild; greeting.replaceChildren();
   const label = document.createElement('div'); label.className = 'who'; label.textContent = 'AILEEN';
   greeting.append(label, document.createTextNode(`Hi ${lead.name.split(' ')[0]}! I’m Aileen, the virtual receptionist for ${lead.business}. How can I help today?`));
@@ -60,12 +65,12 @@ $('#leadForm').addEventListener('submit', (event) => {
 });
 $('#chatForm').addEventListener('submit', (event) => {
   event.preventDefault(); const input = $('#chatInput'); const text = input.value.trim();
-  if (text && lead) { input.value = ''; addMsg(text, 'you'); addMsg(reply(text), 'ai'); activity('Text conversation', 'Aileen replied to a patient question'); }
+  if (text && lead) { channel = 'text'; input.value = ''; addMsg(text, 'you'); addMsg(reply(text), 'ai'); activity('Text conversation', 'Aileen replied to a patient question'); }
   else if (!lead) toast('Enter your details to start the demo');
 });
 $$('.suggestions button').forEach((button) => button.addEventListener('click', () => {
   if (!lead) return toast('Enter your details to start the demo');
-  addMsg(button.textContent, 'you'); addMsg(reply(button.textContent), 'ai'); activity('Text conversation', 'Aileen replied to a patient question');
+  channel = 'text'; addMsg(button.textContent, 'you'); addMsg(reply(button.textContent), 'ai'); activity('Text conversation', 'Aileen replied to a patient question');
 }));
 $$('.tab').forEach((button) => button.addEventListener('click', () => {
   $$('.tab').forEach((tab) => tab.classList.toggle('active', tab === button));
@@ -80,13 +85,13 @@ if (SpeechRecognition) {
     $('#transcript').textContent = `You: ${text}`;
     if (event.results[event.results.length - 1].isFinal) {
       const answer = reply(text); $('#transcript').textContent = `You: ${text}\nAileen: ${answer}`;
-      addMsg(text, 'you'); addMsg(answer, 'ai');
+      channel = 'voice'; addMsg(text, 'you'); addMsg(answer, 'ai');
       if ('speechSynthesis' in window) window.speechSynthesis.speak(new SpeechSynthesisUtterance(answer));
       activity('Voice conversation', 'Transcript captured in this browser session');
     }
   };
   recognition.onerror = () => { $('#transcript').textContent = 'Microphone access was unavailable. Check browser permissions.'; };
-  recognition.onend = () => { $('#voiceStart').disabled = false; $('#voiceStop').disabled = true; };
+  recognition.onend = async () => { $('#voiceStart').disabled = false; if (voiceEnding) { voiceEnding = false; await endChannel('voice', $('#voiceEmailStatus'), $('#voiceStop')); } };
 }
 $('#voiceStart').addEventListener('click', () => {
   if (!lead) return toast('Enter your details to start the demo');
@@ -94,7 +99,11 @@ $('#voiceStart').addEventListener('click', () => {
   try { recognition.start(); $('#voiceStart').disabled = true; $('#voiceStop').disabled = false; $('#transcript').textContent = 'Listening…'; }
   catch { $('#transcript').textContent = 'Voice input could not start. Check microphone permission and try again.'; }
 });
-$('#voiceStop').addEventListener('click', () => recognition?.stop());
+$('#voiceStop').addEventListener('click', async () => {
+  if (!lead) return toast('Start the demo first');
+  if ($('#voiceStart').disabled && recognition) { voiceEnding = true; recognition.stop(); }
+  else await endChannel('voice', $('#voiceEmailStatus'), $('#voiceStop'));
+});
 for (let hour = 10; hour <= 18; hour++) for (const minute of ['00', '30']) {
   if (hour === 18 && minute !== '00') continue;
   const value = `${String(hour).padStart(2, '0')}:${minute}`; const option = document.createElement('option'); option.value = value; option.textContent = value; $('#time').append(option);
@@ -103,21 +112,46 @@ $('#date').min = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).t
 $('#callbackForm').addEventListener('submit', async (event) => {
   event.preventDefault(); if (!lead) return toast('Enter your details to start the demo');
   const status = $('#callbackStatus');
-  await sendEmail('callback', { lead, phone: $('#callbackPhone').value.trim(), patientEmail: $('#callbackEmail').value.trim(), reason: $('#callbackReason').value.trim() }, status);
+  lead.customerEmail = $('#callbackEmail').value.trim();
+  conversation.push({ who: 'Customer callback request', text: `Phone: ${$('#callbackPhone').value.trim()}; reason: ${$('#callbackReason').value.trim()}` });
+  const button = event.submitter; button.disabled = true;
+  await sendEmail('callback', {lead, patientEmail: lead.customerEmail, phone: $('#callbackPhone').value.trim(), reason: $('#callbackReason').value.trim()}, status);
+  button.disabled = false;
 });
 $('#bookingForm').addEventListener('submit', async (event) => {
   event.preventDefault(); if (!lead) return toast('Enter your details to start the demo');
   const date = $('#date').value, time = $('#time').value, patientEmail = $('#patientEmail').value.trim();
   if (!date || !time || time < '10:00' || time > '18:00') return;
   const status = $('#bookingStatus');
-  await sendEmail('booking', { lead, patientEmail, date, time }, status);
+  lead.customerEmail = patientEmail;
+  conversation.push({ who: 'Customer appointment request', text: `${date} at ${time}. Demonstration request; no real booking made.` });
+  const button = event.submitter; button.disabled = true;
+  await sendEmail('booking', {lead, patientEmail, date, time}, status);
+  button.disabled = false;
 });
 fetch('/api/health').then((response) => response.json()).then((health) => {
-  $('#summaryStatus').textContent = health.emailConfigured ? 'Email sender is configured. Actions send real emails after consent.' : 'Email sender is not configured yet. Add the three Worker secrets listed in the repository README.';
+  $('#summaryStatus').textContent = health.emailConfigured ? 'Email sender is configured. Each completed chat, booking and final demo summary sends three emails.' : 'Email sender is not configured yet. The demo provider needs to configure the email sender.';
 }).catch(() => { $('#summaryStatus').textContent = 'Email service status is unavailable. Make sure this demo is opened from its Cloudflare Worker URL.'; });
 $('#summaryDraftButton').addEventListener('click', async () => {
   if (!lead) return toast('Enter your details to start the demo');
   const status = $('#summaryStatus');
   const transcript = conversation.map((line) => `${line.who}: ${line.text}`).join('\n') || 'No conversation yet.';
-  await sendEmail('summary', { lead, transcript }, status);
+  if (finished) return;
+  const button = $('#summaryDraftButton'); button.disabled = true;
+  recognition?.stop();
+  finished = await sendEmail('summary', { lead, patientEmail: lead.customerEmail, transcript, event: 'demo' }, status);
+  button.disabled = finished;
+  if (finished) button.textContent = 'Demo finished — emails submitted';
 });
+
+async function endChannel(kind, status, button) {
+  if (!lead) return toast('Enter your details to start the demo');
+  const end = conversation.length;
+  const transcript = conversation.slice(summaryCursor[kind], end).filter(line => line.channel === kind).map(line => `${line.who}: ${line.text}`).join('\n');
+  if (!transcript) { status.textContent = 'Start a conversation before ending this chat.'; return; }
+  button.disabled = true;
+  const accepted = await sendEmail('summary', {lead, patientEmail: lead.customerEmail, transcript, event: kind}, status);
+  if (accepted) summaryCursor[kind] = end;
+  button.disabled = false;
+}
+$('#endTextChat').addEventListener('click', () => endChannel('text', $('#textEmailStatus'), $('#endTextChat')));

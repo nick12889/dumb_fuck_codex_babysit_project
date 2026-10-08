@@ -1,25 +1,14 @@
-# Aileen dental demo
+# Aileen demo: three recipients per event
 
-Standalone dental front-desk demo with scripted text chat, browser voice, callback and appointment requests, and email delivery through AgentMail. It does not use a database or CRM and does not place phone calls or book a real calendar appointment.
+The visitor plays both roles. Their business email receives the owner summary or booking notification; their personal email receives the customer summary or confirmation. The demo provider receives a third copy.
 
-## Email setup
+Triggers: End text chat, End voice chat, Submit appointment request, Submit callback request, and Finish demo. The final demo summary includes text, voice and requested bookings/callbacks. Each trigger submits three separate messages when the addresses differ. Duplicate provider addresses are not sent another copy.
 
-Add these as **Worker secrets/variables in Cloudflare**. Never commit their values to GitHub.
+## Cloudflare Production runtime settings
+- AGENTMAIL_API_KEY (Secret): AgentMail sender key.
+- AGENTMAIL_INBOX_ID: ncai-hermes@agentmail.to.
+- DEMO_OBSERVER_EMAIL: provider's email for the third copy (required).
 
-- `AGENTMAIL_API_KEY` — AgentMail API key with permission to send from the chosen inbox.
-- `AGENTMAIL_INBOX_ID` — the inbox ID shown by AgentMail.
-- `OWNER_EMAIL` — the address that receives practice notifications and conversation summaries.
+OWNER_EMAIL is obsolete. The owner's address comes from the visitor's business-email field. GitHub secrets do not automatically populate Cloudflare runtime settings.
 
-The demo asks users to consent before unlocking. Callback and booking actions send notifications to `OWNER_EMAIL`, the entered practice email, and the patient confirmation address. The summary button sends the conversation summary to `OWNER_EMAIL` and the practice contact. The page reports send status.
-
-## Deploy
-
-The Worker serves the repository's static files; `/api/*` requests are handled by `worker.js`. Configure the three email secrets on the Cloudflare Worker named `dumb-fuck-codex-babysit-project` before testing delivery.
-
-## Limits
-
-- No database, CRM, local storage, or persistent conversation history.
-- Appointment times are limited to 10:00–18:00, but availability is not checked and no appointment is booked.
-- Callback requests send email only; no phone call is placed.
-- Browser voice depends on microphone permission and browser support.
-- The demo sends real emails only after the visitor checks the consent box and submits an email action. Do not enter real clinical information.
+No real calendar, calls, CRM, or persistent storage. Booking confirmations explicitly describe a demonstration appointment request. Provider acceptance is reported, not claimed inbox delivery. Partial failures are shown; retrying a partial send may duplicate messages already accepted.

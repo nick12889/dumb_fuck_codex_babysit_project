@@ -18,7 +18,7 @@ function rateLimited(request) {
   const key = request.headers.get('cf-connecting-ip') || 'unknown';
   const now = Date.now();
   const recent = (sendHistory.get(key) || []).filter((time) => now - time < 60 * 60 * 1000);
-  if (recent.length >= 8) return true;
+  if (recent.length >= 40) return true;
   recent.push(now);
   sendHistory.set(key, recent);
   return false;
@@ -49,13 +49,13 @@ export default {
     const url = new URL(request.url);
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     if (request.method === 'GET' && url.pathname === '/api/health') {
-      return json({ ok: true, emailConfigured: Boolean(env.AGENTMAIL_API_KEY && env.AGENTMAIL_INBOX_ID && env.OWNER_EMAIL) });
+      return json({ ok: true, emailConfigured: Boolean(env.AGENTMAIL_API_KEY && env.AGENTMAIL_INBOX_ID && EMAIL_RE.test(clean(env.DEMO_OBSERVER_EMAIL, 254))) });
     }
     if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
     const origin = request.headers.get('origin');
     if (origin && origin !== url.origin) return json({ error: 'Cross-origin request rejected.' }, 403);
-    if (!env.AGENTMAIL_API_KEY || !env.AGENTMAIL_INBOX_ID || !env.OWNER_EMAIL || !EMAIL_RE.test(env.OWNER_EMAIL)) {
-      return json({ error: 'Email is not configured yet. Set AGENTMAIL_API_KEY, AGENTMAIL_INBOX_ID, and OWNER_EMAIL as Worker secrets.' }, 503);
+    if (!env.AGENTMAIL_API_KEY || !env.AGENTMAIL_INBOX_ID || !EMAIL_RE.test(clean(env.DEMO_OBSERVER_EMAIL, 254))) {
+      return json({ error: 'Email is not configured yet. Set AGENTMAIL_API_KEY, AGENTMAIL_INBOX_ID and DEMO_OBSERVER_EMAIL as Worker secrets.' }, 503);
     }
     const contentLength = Number(request.headers.get('content-length') || 0);
     if (contentLength > 20000) return json({ error: 'Request is too large.' }, 413);
@@ -66,15 +66,18 @@ export default {
     if (rateLimited(request)) return json({ error: 'Email demo limit reached for this network. Try again later.' }, 429);
 
     const lead = body.lead;
-    const owner = env.OWNER_EMAIL;
+    const observer = clean(env.DEMO_OBSERVER_EMAIL, 254);
     const practice = clean(lead.email, 254);
     let subject;
     let detail;
     let patientEmail = '';
     if (url.pathname === '/api/summary') {
+      patientEmail = clean(body.patientEmail, 254);
+      if (!EMAIL_RE.test(patientEmail)) return json({ error: 'Enter your personal email for the customer summary.' }, 400);
       const transcript = clean(body.transcript, 6000) || 'No conversation yet.';
-      subject = `Aileen conversation summary · ${clean(lead.business, 160)}`;
-      detail = `Aileen demo conversation summary\n\nContact: ${clean(lead.name, 100)}\nPractice: ${clean(lead.business, 160)}\nBusiness email: ${practice}\nPhone: ${clean(lead.phone, 40)}\n\nConversation:\n${transcript}${internalFooter()}`;
+      const eventTitle = ({text: 'Text chat summary', voice: 'Voice call summary', demo: 'Complete demo summary'})[body.event] || 'Conversation summary';
+      subject = `${eventTitle} · ${clean(lead.business, 160)}`;
+      detail = `${subject}\n\nContact: ${clean(lead.name, 100)}\nPractice: ${clean(lead.business, 160)}\nBusiness email: ${practice}\nPhone: ${clean(lead.phone, 40)}\n\nConversation:\n${transcript}${internalFooter()}`;
     } else if (url.pathname === '/api/callback') {
       patientEmail = clean(body.patientEmail, 254);
       const phone = clean(body.phone, 40);
@@ -100,10 +103,12 @@ export default {
         : `Hello ${clean(lead.name, 100)},\n\nHere is the Aileen demo conversation summary you requested.\n\n${clean(body.transcript, 6000) || 'No conversation yet.'}${internalFooter()}`;
 
     try {
-      const recipients = url.pathname === '/api/summary' ? [owner, practice] : [owner, practice, patientEmail];
+      const recipients = [practice];
+      if (EMAIL_RE.test(observer) && observer.toLowerCase() !== practice.toLowerCase() && observer.toLowerCase() !== patientEmail.toLowerCase()) recipients.push(observer);
+      const customerSubject = url.pathname === '/api/summary' ? subject : url.pathname === '/api/booking' ? `We received your appointment request · ${clean(lead.business, 160)}` : `We received your callback request · ${clean(lead.business, 160)}`;
       const [internalResult, patientResult] = await Promise.all([
-        sendToRecipients(env, recipients.filter((email) => email !== patientEmail), subject, detail),
-        patientEmail ? sendToRecipients(env, [patientEmail], url.pathname === '/api/booking' ? `We received your appointment request · ${clean(lead.business, 160)}` : `We received your callback request · ${clean(lead.business, 160)}`, patientBody) : Promise.resolve({ sent: 0, total: 0, partial: false, messageIds: [] })
+        sendToRecipients(env, recipients, subject, detail),
+        sendToRecipients(env, [patientEmail], customerSubject, patientBody)
       ]);
       const totalSent = internalResult.sent + patientResult.sent;
       if (!totalSent) return json({ error: 'No email was accepted by AgentMail. Check AgentMail recipient permissions and Worker secrets.' }, 502);

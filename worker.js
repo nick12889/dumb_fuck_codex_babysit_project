@@ -1,120 +1,60 @@
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const sendHistory = new Map();
-
-const json = (data, status = 200) => new Response(JSON.stringify(data), {
-  status,
-  headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
-});
-const clean = (value, max = 1000) => typeof value === 'string' ? value.trim().slice(0, max) : '';
-const escapeHtml = (value) => value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-
-function validateLead(lead) {
-  return lead && typeof lead === 'object'
-    && clean(lead.name, 100) && clean(lead.business, 160)
-    && EMAIL_RE.test(clean(lead.email, 254)) && clean(lead.phone, 40)
-    && lead.consent === true;
-}
-function rateLimited(request) {
-  const key = request.headers.get('cf-connecting-ip') || 'unknown';
-  const now = Date.now();
-  const recent = (sendHistory.get(key) || []).filter((time) => now - time < 60 * 60 * 1000);
-  if (recent.length >= 40) return true;
-  recent.push(now);
-  sendHistory.set(key, recent);
-  return false;
-}
-async function sendEmail(env, to, subject, text) {
-  const response = await fetch(`https://api.agentmail.to/v0/inboxes/${encodeURIComponent(env.AGENTMAIL_INBOX_ID)}/messages/send`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${env.AGENTMAIL_API_KEY}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ to, subject, text, html: `<div style="font-family:Arial,sans-serif;white-space:pre-wrap">${escapeHtml(text)}</div>` })
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result.message_id) throw new Error('The email provider rejected a message. Check the AgentMail inbox and sending permissions.');
-  return result.message_id || null;
-}
-async function sendToRecipients(env, recipients, subject, body) {
-  const unique = [...new Set(recipients.map((email) => clean(email, 254).toLowerCase()).filter((email) => EMAIL_RE.test(email)))];
-  const settled = await Promise.allSettled(unique.map((email) => sendEmail(env, email, subject, body)));
-  const sent = settled.filter((result) => result.status === 'fulfilled').length;
-  const failures = settled.length - sent;
-  return { sent, total: settled.length, partial: sent > 0 && failures > 0, messageIds: settled.filter((r) => r.status === 'fulfilled' && r.value).map((r) => r.value) };
-}
-function internalFooter() {
-  return '\n\nSent by the Aileen demo after the user requested a test email. This is a demonstration message; no calendar booking, phone call, or database update occurred.';
-}
-
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
-    if (request.method === 'GET' && url.pathname === '/api/health') {
-      return json({ ok: true, emailConfigured: Boolean(env.AGENTMAIL_API_KEY && env.AGENTMAIL_INBOX_ID && EMAIL_RE.test(clean(env.DEMO_OBSERVER_EMAIL, 254))) });
-    }
-    if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
-    const origin = request.headers.get('origin');
-    if (origin && origin !== url.origin) return json({ error: 'Cross-origin request rejected.' }, 403);
-    if (!env.AGENTMAIL_API_KEY || !env.AGENTMAIL_INBOX_ID || !EMAIL_RE.test(clean(env.DEMO_OBSERVER_EMAIL, 254))) {
-      return json({ error: 'Email is not configured yet. Set AGENTMAIL_API_KEY, AGENTMAIL_INBOX_ID and DEMO_OBSERVER_EMAIL as Worker secrets.' }, 503);
-    }
-    const contentLength = Number(request.headers.get('content-length') || 0);
-    if (contentLength > 20000) return json({ error: 'Request is too large.' }, 413);
-    let body;
-    try { body = await request.json(); } catch { return json({ error: 'Invalid request body.' }, 400); }
-    if (!body || typeof body !== 'object' || clean(body.website, 200)) return json({ error: 'Invalid request.' }, 400);
-    if (!validateLead(body.lead)) return json({ error: 'Enter your name, practice, valid business email and phone, and confirm that demo emails may be sent.' }, 400);
-    if (rateLimited(request)) return json({ error: 'Email demo limit reached for this network. Try again later.' }, 429);
-
-    const lead = body.lead;
-    const observer = clean(env.DEMO_OBSERVER_EMAIL, 254);
-    const practice = clean(lead.email, 254);
-    let subject;
-    let detail;
-    let patientEmail = '';
-    if (url.pathname === '/api/summary') {
-      patientEmail = clean(body.patientEmail, 254);
-      if (!EMAIL_RE.test(patientEmail)) return json({ error: 'Enter your personal email for the customer summary.' }, 400);
-      const transcript = clean(body.transcript, 6000) || 'No conversation yet.';
-      const eventTitle = ({text: 'Text chat summary', voice: 'Voice call summary', demo: 'Complete demo summary'})[body.event] || 'Conversation summary';
-      subject = `${eventTitle} · ${clean(lead.business, 160)}`;
-      detail = `${subject}\n\nContact: ${clean(lead.name, 100)}\nPractice: ${clean(lead.business, 160)}\nBusiness email: ${practice}\nPhone: ${clean(lead.phone, 40)}\n\nConversation:\n${transcript}${internalFooter()}`;
-    } else if (url.pathname === '/api/callback') {
-      patientEmail = clean(body.patientEmail, 254);
-      const phone = clean(body.phone, 40);
-      if (!phone || !EMAIL_RE.test(patientEmail)) return json({ error: 'Enter a callback phone number and a valid email for the confirmation.' }, 400);
-      subject = `Callback request · ${clean(lead.business, 160)}`;
-      detail = `Callback requested through the Aileen demo\n\nPractice: ${clean(lead.business, 160)}\nPatient phone: ${phone}\nPatient email: ${patientEmail}\nReason: ${clean(body.reason, 300) || 'No reason provided'}${internalFooter()}`;
-    } else if (url.pathname === '/api/booking') {
-      patientEmail = clean(body.patientEmail, 254);
-      const date = clean(body.date, 10), time = clean(body.time, 5);
-      if (!EMAIL_RE.test(patientEmail) || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time) || time < '10:00' || time > '18:00') {
-        return json({ error: 'Enter a valid patient email, date and time between 10:00 and 18:00.' }, 400);
-      }
-      subject = `Appointment request · ${clean(lead.business, 160)}`;
-      detail = `Appointment request received through the Aileen demo\n\nPractice: ${clean(lead.business, 160)}\nPatient email: ${patientEmail}\nPreferred date: ${date}\nPreferred time: ${time}\n\nThis is a request for the practice to confirm. No calendar was checked and no appointment was booked.${internalFooter()}`;
-    } else {
-      return json({ error: 'Not found.' }, 404);
-    }
-
-    const patientBody = url.pathname === '/api/booking'
-      ? `Hello,\n\nWe received your appointment request for ${clean(lead.business, 160)} on ${clean(body.date, 10)} at ${clean(body.time, 5)}. The practice team will need to confirm the time.${internalFooter()}`
-      : url.pathname === '/api/callback'
-        ? `Hello,\n\nWe received your callback request for ${clean(lead.business, 160)}. The practice team will follow up using the phone number you provided.${internalFooter()}`
-        : `Hello ${clean(lead.name, 100)},\n\nHere is the Aileen demo conversation summary you requested.\n\n${clean(body.transcript, 6000) || 'No conversation yet.'}${internalFooter()}`;
-
-    try {
-      const recipients = [practice];
-      if (EMAIL_RE.test(observer) && observer.toLowerCase() !== practice.toLowerCase() && observer.toLowerCase() !== patientEmail.toLowerCase()) recipients.push(observer);
-      const customerSubject = url.pathname === '/api/summary' ? subject : url.pathname === '/api/booking' ? `We received your appointment request · ${clean(lead.business, 160)}` : `We received your callback request · ${clean(lead.business, 160)}`;
-      const [internalResult, patientResult] = await Promise.all([
-        sendToRecipients(env, recipients, subject, detail),
-        sendToRecipients(env, [patientEmail], customerSubject, patientBody)
-      ]);
-      const totalSent = internalResult.sent + patientResult.sent;
-      if (!totalSent) return json({ error: 'No email was accepted by AgentMail. Check AgentMail recipient permissions and Worker secrets.' }, 502);
-      return json({ ok: true, sent: totalSent, total: internalResult.total + patientResult.total, partial: totalSent < internalResult.total + patientResult.total, messageIds: [...internalResult.messageIds, ...patientResult.messageIds] });
-    } catch {
-      return json({ error: 'The email provider could not send the message. Check AgentMail configuration.' }, 502);
-    }
+import {buildEmails, VERSION, titles} from './email-templates.js';
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const recent = new Map(), events = new Map();
+const json = (v,status=200)=>new Response(JSON.stringify(v),{status,headers:{'content-type':'application/json','cache-control':'no-store'}});
+const clean = (s,n=1000)=>typeof s==='string'?s.trim().slice(0,n):'';
+function validate(data) {
+  if (!data || !titles[data.kind] || !/^[a-zA-Z0-9-]{10,100}$/.test(data.id||'')) return 'Invalid email event.';
+  const l=data.lead;
+  if (!l || !clean(l.name,100)||!clean(l.business,160)||!clean(l.phone,40)||!EMAIL.test(l.email||'')||!EMAIL.test(l.customerEmail||'')||l.consent!==true) return 'Enter both email addresses, name, business, phone and consent.';
+  if ([l.name,l.business,l.email,l.customerEmail,l.phone,l.timezone].some(v=>typeof v!=='string'||v.length>254)) return 'Invalid contact information.';
+  try {new Intl.DateTimeFormat('en',{timeZone:l.timezone});} catch {return 'Select a valid timezone.';}
+  if (!Array.isArray(data.lines)||data.lines.length>600||data.lines.some(l=>!['Customer','Aileen','System'].includes(l.who)||typeof l.text!=='string'||l.text.length>2000||!['text','voice','demo'].includes(l.channel))) return 'Conversation is too large or invalid.';
+  if (!Array.isArray(data.bookings)||data.bookings.length>50||data.bookings.some(b=>!b||!Array.isArray(b.choices)||b.choices.some(v=>typeof v!=='string')||typeof b.status!=='string'||typeof b.service!=='string')) return 'Invalid booking history.';
+  if (!Array.isArray(data.callbacks)||data.callbacks.length>50||data.callbacks.some(c=>!c||['service','urgency','reason','phone'].some(k=>typeof c[k]!=='string'))) return 'Invalid callback history.';
+  const slots=data.kind==='choices'?data.choices:['booking','reschedule','reminder','cancel'].includes(data.kind)?[data.selected]:[];
+  if (!Array.isArray(slots)||data.kind==='choices'&&(slots.length!==3||new Set(slots).size!==3)) return 'Provide three distinct preferred times.';
+  for(const slot of slots){
+    if(typeof slot!=='string'||!/^\d{4}-\d{2}-\d{2}T(?:1[0-7]:(?:00|30)|18:00)$/.test(slot)) return 'Use half-hour slots from 10:00 to 18:00.';
+    const [date]=slot.split('T'); const d=new Date(date+'T12:00:00Z');
+    if(Number.isNaN(d.getTime())||d.toISOString().slice(0,10)!==date) return 'Invalid date.';
+    const parts=new Intl.DateTimeFormat('en-CA',{timeZone:l.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+    const today=['year','month','day'].map(k=>parts.find(p=>p.type===k).value).join('-');
+    if(!['cancel','reminder'].includes(data.kind)&&date<today) return 'Choose today or a future date.';
   }
-};
+  if(['callback','booking','choices','reschedule','cancel','reminder'].includes(data.kind)&&!clean(data.service,100))return 'Select a service.';
+  if(data.kind==='callback'&&(!clean(data.phone,40)||!['Routine','Urgent'].includes(data.urgency)))return 'Provide callback details.';
+  return null;
+}
+async function send(env,mail,key){
+ const r=await fetch(`https://api.agentmail.to/v0/inboxes/${encodeURIComponent(env.AGENTMAIL_INBOX_ID)}/messages/send`,{method:'POST',headers:{authorization:`Bearer ${env.AGENTMAIL_API_KEY}`,'content-type':'application/json'},body:JSON.stringify({to:mail.to,subject:mail.subject,text:mail.body}),signal:AbortSignal.timeout(20000)});
+ const data=await r.json().catch(()=>({})); if(!r.ok||!data.message_id)throw new Error('Provider rejected this message.'); return data.message_id;
+}
+export default {async fetch(request,env){
+ const url=new URL(request.url);
+ if(!url.pathname.startsWith('/api/'))return env.ASSETS.fetch(request);
+ const configured=Boolean(env.AGENTMAIL_API_KEY&&env.AGENTMAIL_INBOX_ID&&EMAIL.test(env.DEMO_OBSERVER_EMAIL||''));
+ if(request.method==='GET'&&url.pathname==='/api/health')return json({version:VERSION,emailConfigured:configured,observerEmail:env.DEMO_OBSERVER_EMAIL||''});
+ if(request.method!=='POST'||url.pathname!=='/api/email')return json({error:'Not found'},404);
+ if(request.headers.get('origin')!==url.origin)return json({error:'Same-origin request required.'},403);
+ const raw=await request.text();if(raw.length>160000)return json({error:'This demo session is too large. End shorter conversations separately.'},413);
+ let data;try{data=JSON.parse(raw);}catch{return json({error:'Invalid request.'},400);}
+ if(data.website)return json({error:'Invalid request.'},400);
+ const error=validate(data);if(error)return json({error},400);
+ if(!configured)return json({error:'The demo email sender needs configuration.'},503);
+ const now=Date.now();for(const [k,v]of events)if(now-v.created>3600000)events.delete(k);
+ const ip=request.headers.get('cf-connecting-ip')||'unknown';const times=(recent.get(ip)||[]).filter(t=>now-t<3600000);if(times.length>=60)return json({error:'Demo email limit reached. Try again later.'},429);times.push(now);recent.set(ip,times);
+ const mails=buildEmails(data,env.DEMO_OBSERVER_EMAIL);
+ const key=ip+':'+data.id;const fingerprint=JSON.stringify(mails);let record=events.get(key);
+ if(record&&record.fingerprint!==fingerprint)return json({error:'Event changed. Create a new event.'},409);
+ if(!record){record={created:now,fingerprint,accepted:{},pending:{}};events.set(key,record);}
+ const skipped=new Set(Array.isArray(data.acceptedRoles)?data.acceptedRoles:[]);
+ const statuses=await Promise.all(mails.map(async mail=>{
+  if(record.accepted[mail.role]||skipped.has(mail.role))return {role:mail.role,to:mail.to,status:'accepted',messageId:record.accepted[mail.role]||null};
+  try{
+   if(!record.pending[mail.role])record.pending[mail.role]=send(env,mail,key).then(id=>{record.accepted[mail.role]=id;return id;}).finally(()=>delete record.pending[mail.role]);
+   const id=await record.pending[mail.role];return {role:mail.role,to:mail.to,status:'accepted',messageId:id};
+  }catch{return {role:mail.role,to:mail.to,status:'failed',error:'Not confirmed by the email provider. A timeout can have an uncertain outcome.'};}
+ }));
+ return json({ok:statuses.every(s=>s.status==='accepted'),statuses});
+}};

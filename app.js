@@ -1,157 +1,65 @@
-const $ = (s) => document.querySelector(s);
-const $$ = (s) => document.querySelectorAll(s);
-let lead = null;
-const messages = $('#messages');
-const conversation = [];
-let finished = false;
-let channel = 'text';
-let voiceEnding = false;
-const summaryCursor = {text: 0, voice: 0};
-
-function toast(text) {
-  const node = $('#toast');
-  node.textContent = text;
-  node.classList.add('show');
-  setTimeout(() => node.classList.remove('show'), 3000);
-}
-function activity(title, detail) {
-  const row = document.createElement('div'); row.className = 'activity-row';
-  const dot = document.createElement('div'); dot.className = 'dot';
-  const copy = document.createElement('div'); copy.append(document.createTextNode(title));
-  const small = document.createElement('small'); small.textContent = detail; copy.append(small);
-  row.append(dot, copy); $('#activity').prepend(row);
-}
-function addMsg(text, who) {
-  const node = document.createElement('div'); node.className = `msg ${who === 'you' ? 'you' : ''}`;
-  const label = document.createElement('div'); label.className = 'who'; label.textContent = who === 'you' ? 'YOU' : 'AILEEN';
-  node.append(label, document.createTextNode(text)); messages.append(node); messages.scrollTop = messages.scrollHeight;
-  conversation.push({ who: who === 'you' ? 'Visitor' : 'Aileen', text, channel });
-}
-function reply(question) {
-  const q = question.toLowerCase();
-  if (/hour|open|close|time/.test(q)) return 'Our practice can help with appointment requests between 10:00 and 18:00. Would you like me to find a time?';
-  if (/new patient|accept|register/.test(q)) return 'We’d be happy to welcome new patients. I can take your details and ask the practice team to follow up.';
-  if (/toothache|pain|emergency|swollen/.test(q)) return 'I’m sorry you’re dealing with that. For severe swelling, heavy bleeding, or trouble breathing, seek urgent medical help. Otherwise, I can ask the dental team to contact you.';
-  if (/book|appointment|visit/.test(q)) return 'Use the Book a visit tab to choose a preferred date and a time between 10:00 and 18:00. I’ll prepare request and confirmation emails for the practice to review.';
-  if (/price|cost|insurance/.test(q)) return 'The practice team can confirm current fees and insurance details. I can ask them to contact you.';
-  return 'I can help with opening hours, new patient enquiries, and appointment requests. For treatment advice, I’ll connect you with the dental team.';
-}
-async function sendEmail(kind, data, statusNode) {
-  statusNode.textContent = 'Sending email…';
-  try {
-    const response = await fetch(`/api/${kind}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...data, website: $('#website').value }) });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || 'Email could not be sent.');
-    statusNode.textContent = result.partial ? `Partially sent: ${result.sent} of ${result.total} email messages. Check the AgentMail inbox.` : `AgentMail accepted email for ${result.sent} recipient${result.sent === 1 ? '' : 's'}.`;
-    activity('Email accepted by AgentMail', `${kind} · ${new Date().toLocaleTimeString()}`);
-    return !result.partial;
-  } catch (error) {
-    statusNode.textContent = error.message || 'Email could not be sent.';
-    activity('Email not sent', 'Check Worker email settings');
-    return false;
-  }
-}
-$('#leadForm').addEventListener('submit', (event) => {
-  event.preventDefault();
-  lead = { name: $('#name').value.trim(), business: $('#business').value.trim(), email: $('#email').value.trim(), phone: $('#phone').value.trim(), customerEmail: $('#customerEmail').value.trim(), consent: $('#emailConsent').checked };
-  $('#gateStatus').textContent = `Demo unlocked for ${lead.business}. Play the customer. Chat endings, bookings and the final demo summary each send three emails.`;
-  $('#callbackPhone').value = lead.phone; $('#callbackEmail').value = lead.customerEmail; $('#patientEmail').value = lead.customerEmail;
-  finished = false; conversation.length = 0; summaryCursor.text = 0; summaryCursor.voice = 0; $('#summaryDraftButton').disabled = false; $('#summaryDraftButton').textContent = 'Finish demo & email all three';
-  const greeting = messages.firstElementChild; greeting.replaceChildren();
-  const label = document.createElement('div'); label.className = 'who'; label.textContent = 'AILEEN';
-  greeting.append(label, document.createTextNode(`Hi ${lead.name.split(' ')[0]}! I’m Aileen, the virtual receptionist for ${lead.business}. How can I help today?`));
-  conversation.push({ who: 'Aileen', text: `Welcome to ${lead.business}. How can I help today?` });
-  activity('Demo started', `${lead.name} · ${lead.business}`);
+import {buildEmails, classify, titles, VERSION} from './email-templates.js';
+const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);
+let lead=null, phase='idle', observer='', configured=false, afterHours=false;
+let lines=[],bookings=[],callbacks=[],mailEvents=[],enquiries=[],voiceActive=false,voiceStopResolve=null;
+let cursor={text:0,voice:0};let recognition=null;let channelBusy={text:false,voice:false};
+const uid=()=>crypto.randomUUID();
+function text(tag,value,cls){const n=document.createElement(tag);n.textContent=value;if(cls)n.className=cls;return n;}
+function toast(message){$('#toast').textContent=message;$('#toast').classList.add('show');setTimeout(()=>$('#toast').classList.remove('show'),4000);}
+function status(id,message){$(id).textContent=message;}
+function allowed(){if(phase!=='active'){toast(phase==='finished'?'Demo finished. Start a new session to continue.':'Enter your details to start the demo.');return false;}return true;}
+function activity(title,detail){const row=text('div',title,'activity-row');row.append(text('small',detail));$('#activity').prepend(row);}
+function show(panel){$$('.tab').forEach(t=>{t.classList.toggle('active',t.dataset.panel===panel);t.setAttribute('aria-selected',String(t.dataset.panel===panel));});$$('.panel').forEach(p=>p.classList.toggle('active',p.id===panel));}
+$$('.tab').forEach(b=>b.addEventListener('click',()=>show(b.dataset.panel)));
+$('#openOwner').onclick=()=>show('owner');$('#openEmails').onclick=()=>show('emails');
+function message(value,who,channel){const row=text('div','','msg'+(who==='Customer'?' you':''));row.append(text('div',who.toUpperCase(),'who'),document.createTextNode(value));$('#messages').append(row);$('#messages').scrollTop=$('#messages').scrollHeight;lines.push({who,text:value,channel});}
+function answer(q){const c=classify(q,afterHours);if(c.urgency.startsWith('Urgent'))return 'Please contact the dental team promptly. For trouble breathing, uncontrolled bleeding or severe swelling, seek emergency care. I can flag your enquiry for urgent staff review; this demo does not contact emergency services.';if(/hour|open|clos|time/i.test(q))return afterHours?'This walkthrough is set to after hours. Reception will review enquiries at the next opening; demo appointment choices run from 10:00 to 18:00.':'Demo appointment choices run from 10:00 to 18:00. These are example hours, not verified practice availability.';if(/book|appointment|visit/i.test(q))return 'Choose Book a visit. You can confirm a simulated time or suggest A/B/C, then switch to Owner view to select one.';if(/new patient|accept|register/i.test(q))return 'We can record a new-patient enquiry for the practice. Choose a consultation in Book a visit, or request a callback.';if(/price|cost|insurance/i.test(q))return 'The practice team will need to confirm fees and insurance. I can record a callback request.';return 'I can demonstrate opening hours, new-patient enquiries, bookings and callbacks. Treatment advice needs a dental professional.';}
+function converse(q,channel){message(q,'Customer',channel);const response=answer(q);message(response,'Aileen',channel);enquiries.push({question:q,...classify(q,afterHours),channel});activity(`${channel} enquiry`,classify(q,afterHours).route);renderOwner();return response;}
+function syncRoleFields(){$('#callbackEmail').value=lead?.customerEmail||'';$('#patientEmail').value=lead?.customerEmail||'';}
+$('#leadForm').addEventListener('submit',async e=>{
+ e.preventDefault();if(phase==='finishing'||mailEvents.some(m=>m.busy)){toast('Wait for the current emails to finish before restarting.');return;}
+ if(lead&&!window.confirm('Start a new demo session? This clears the current session history from this page.'))return;
+ await stopVoice();window.speechSynthesis?.cancel();
+ lead={name:$('#name').value.trim(),business:$('#business').value.trim(),email:$('#email').value.trim(),customerEmail:$('#customerEmail').value.trim(),phone:$('#phone').value.trim(),timezone:$('#timezone').value,consent:$('#emailConsent').checked};
+ afterHours=$('#scenario').value==='closed';phase='active';lines=[];bookings=[];callbacks=[];enquiries=[];mailEvents=[];cursor={text:0,voice:0};channelBusy={text:false,voice:false};
+ $('#messages').replaceChildren();$('#activity').replaceChildren();$('#emailEvents').replaceChildren();
+ ['#textEmailStatus','#voiceEmailStatus','#bookingStatus','#callbackStatus'].forEach(s=>status(s,''));status('#transcript','Transcript will appear here.');
+ $('#summaryDraftButton').disabled=false;$('#summaryDraftButton').textContent='Finish demo & email all three';
+ $$('#leadForm input,#leadForm select').forEach(n=>{if(n.id!=='website')n.disabled=true;});$('#leadForm button').textContent='Start a new demo';
+ syncRoleFields();$('#callbackPhone').value=lead.phone;
+ message(`Welcome to ${lead.business}. This is a scripted demo. How can I help?`,'Aileen','text');
+ status('#gateStatus',`${lead.business} · ${afterHours?'After hours':'Opening hours'} · Owner: ${lead.email} · Customer: ${lead.customerEmail}`);
+ activity('Demo started','Session-only data');renderOwner();show('chat');
 });
-$('#chatForm').addEventListener('submit', (event) => {
-  event.preventDefault(); const input = $('#chatInput'); const text = input.value.trim();
-  if (text && lead) { channel = 'text'; input.value = ''; addMsg(text, 'you'); addMsg(reply(text), 'ai'); activity('Text conversation', 'Aileen replied to a patient question'); }
-  else if (!lead) toast('Enter your details to start the demo');
-});
-$$('.suggestions button').forEach((button) => button.addEventListener('click', () => {
-  if (!lead) return toast('Enter your details to start the demo');
-  channel = 'text'; addMsg(button.textContent, 'you'); addMsg(reply(button.textContent), 'ai'); activity('Text conversation', 'Aileen replied to a patient question');
-}));
-$$('.tab').forEach((button) => button.addEventListener('click', () => {
-  $$('.tab').forEach((tab) => tab.classList.toggle('active', tab === button));
-  $$('.panel').forEach((panel) => panel.classList.toggle('active', panel.id === button.dataset.panel));
-}));
-let recognition = null;
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-if (SpeechRecognition) {
-  recognition = new SpeechRecognition(); recognition.lang = 'en-IE'; recognition.interimResults = true;
-  recognition.onresult = (event) => {
-    let text = ''; for (let i = event.resultIndex; i < event.results.length; i++) text += event.results[i][0].transcript;
-    $('#transcript').textContent = `You: ${text}`;
-    if (event.results[event.results.length - 1].isFinal) {
-      const answer = reply(text); $('#transcript').textContent = `You: ${text}\nAileen: ${answer}`;
-      channel = 'voice'; addMsg(text, 'you'); addMsg(answer, 'ai');
-      if ('speechSynthesis' in window) window.speechSynthesis.speak(new SpeechSynthesisUtterance(answer));
-      activity('Voice conversation', 'Transcript captured in this browser session');
-    }
-  };
-  recognition.onerror = () => { $('#transcript').textContent = 'Microphone access was unavailable. Check browser permissions.'; };
-  recognition.onend = async () => { $('#voiceStart').disabled = false; if (voiceEnding) { voiceEnding = false; await endChannel('voice', $('#voiceEmailStatus'), $('#voiceStop')); } };
-}
-$('#voiceStart').addEventListener('click', () => {
-  if (!lead) return toast('Enter your details to start the demo');
-  if (!recognition) { $('#transcript').textContent = 'Voice recognition is not supported in this browser. Try Chrome or Edge.'; return; }
-  try { recognition.start(); $('#voiceStart').disabled = true; $('#voiceStop').disabled = false; $('#transcript').textContent = 'Listening…'; }
-  catch { $('#transcript').textContent = 'Voice input could not start. Check microphone permission and try again.'; }
-});
-$('#voiceStop').addEventListener('click', async () => {
-  if (!lead) return toast('Start the demo first');
-  if ($('#voiceStart').disabled && recognition) { voiceEnding = true; recognition.stop(); }
-  else await endChannel('voice', $('#voiceEmailStatus'), $('#voiceStop'));
-});
-for (let hour = 10; hour <= 18; hour++) for (const minute of ['00', '30']) {
-  if (hour === 18 && minute !== '00') continue;
-  const value = `${String(hour).padStart(2, '0')}:${minute}`; const option = document.createElement('option'); option.value = value; option.textContent = value; $('#time').append(option);
-}
-$('#date').min = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-$('#callbackForm').addEventListener('submit', async (event) => {
-  event.preventDefault(); if (!lead) return toast('Enter your details to start the demo');
-  const status = $('#callbackStatus');
-  lead.customerEmail = $('#callbackEmail').value.trim();
-  conversation.push({ who: 'Customer callback request', text: `Phone: ${$('#callbackPhone').value.trim()}; reason: ${$('#callbackReason').value.trim()}` });
-  const button = event.submitter; button.disabled = true;
-  await sendEmail('callback', {lead, patientEmail: lead.customerEmail, phone: $('#callbackPhone').value.trim(), reason: $('#callbackReason').value.trim()}, status);
-  button.disabled = false;
-});
-$('#bookingForm').addEventListener('submit', async (event) => {
-  event.preventDefault(); if (!lead) return toast('Enter your details to start the demo');
-  const date = $('#date').value, time = $('#time').value, patientEmail = $('#patientEmail').value.trim();
-  if (!date || !time || time < '10:00' || time > '18:00') return;
-  const status = $('#bookingStatus');
-  lead.customerEmail = patientEmail;
-  conversation.push({ who: 'Customer appointment request', text: `${date} at ${time}. Demonstration request; no real booking made.` });
-  const button = event.submitter; button.disabled = true;
-  await sendEmail('booking', {lead, patientEmail, date, time}, status);
-  button.disabled = false;
-});
-fetch('/api/health').then((response) => response.json()).then((health) => {
-  $('#summaryStatus').textContent = health.emailConfigured ? 'Email sender is configured. Each completed chat, booking and final demo summary sends three emails.' : 'Email sender is not configured yet. The demo provider needs to configure the email sender.';
-}).catch(() => { $('#summaryStatus').textContent = 'Email service status is unavailable. Make sure this demo is opened from its Cloudflare Worker URL.'; });
-$('#summaryDraftButton').addEventListener('click', async () => {
-  if (!lead) return toast('Enter your details to start the demo');
-  const status = $('#summaryStatus');
-  const transcript = conversation.map((line) => `${line.who}: ${line.text}`).join('\n') || 'No conversation yet.';
-  if (finished) return;
-  const button = $('#summaryDraftButton'); button.disabled = true;
-  recognition?.stop();
-  finished = await sendEmail('summary', { lead, patientEmail: lead.customerEmail, transcript, event: 'demo' }, status);
-  button.disabled = finished;
-  if (finished) button.textContent = 'Demo finished — emails submitted';
-});
-
-async function endChannel(kind, status, button) {
-  if (!lead) return toast('Enter your details to start the demo');
-  const end = conversation.length;
-  const transcript = conversation.slice(summaryCursor[kind], end).filter(line => line.channel === kind).map(line => `${line.who}: ${line.text}`).join('\n');
-  if (!transcript) { status.textContent = 'Start a conversation before ending this chat.'; return; }
-  button.disabled = true;
-  const accepted = await sendEmail('summary', {lead, patientEmail: lead.customerEmail, transcript, event: kind}, status);
-  if (accepted) summaryCursor[kind] = end;
-  button.disabled = false;
-}
-$('#endTextChat').addEventListener('click', () => endChannel('text', $('#textEmailStatus'), $('#endTextChat')));
+// A new session first unlocks the form so role details can be changed without changing an active session.
+$('#leadForm button').addEventListener('click',e=>{if(lead&&$('#name').disabled){e.preventDefault();if(mailEvents.some(m=>m.busy)||phase==='finishing')return toast('Wait for email operations to finish.');if(!window.confirm('End this session and enter details for a new demo?'))return;phase='idle';stopVoice();$$('#leadForm input,#leadForm select').forEach(n=>n.disabled=false);$('#leadForm button').textContent='Start the demo';status('#gateStatus','Edit your details, then start to clear the previous session.');}});
+$('#chatForm').addEventListener('submit',e=>{e.preventDefault();if(!allowed()||channelBusy.text)return;const q=$('#chatInput').value.trim();if(q){$('#chatInput').value='';converse(q.slice(0,2000),'text');}});
+$$('.suggestions button').forEach(b=>b.onclick=()=>{if(allowed()&&!channelBusy.text)converse(b.textContent,'text');});
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+if(SR){recognition=new SR();recognition.lang='en-IE';recognition.interimResults=true;recognition.onresult=e=>{let interim='';for(let i=e.resultIndex;i<e.results.length;i++){const q=e.results[i][0].transcript;if(e.results[i].isFinal&&['active','finishing'].includes(phase)){const response=converse(q.slice(0,2000),'voice');if(phase==='active'&&!voiceStopResolve&&'speechSynthesis'in window)speechSynthesis.speak(new SpeechSynthesisUtterance(response));}else interim+=q;}status('#transcript',interim||lines.filter(l=>l.channel==='voice').slice(-4).map(l=>`${l.who}: ${l.text}`).join('\n'));};recognition.onend=()=>{voiceActive=false;$('#voiceStart').disabled=false;if(voiceStopResolve){voiceStopResolve();voiceStopResolve=null;}};recognition.onerror=e=>status('#transcript',`Voice input unavailable (${e.error}). You can continue with text.`);}
+function stopVoice(){window.speechSynthesis?.cancel();if(!voiceActive||!recognition)return Promise.resolve();return new Promise(resolve=>{voiceStopResolve=resolve;recognition.stop();setTimeout(()=>{if(voiceStopResolve){recognition.abort();voiceActive=false;voiceStopResolve();voiceStopResolve=null;}},2500);});}
+$('#voiceStart').onclick=()=>{if(!allowed()||channelBusy.voice)return;if(!recognition)return status('#transcript','Browser voice is unavailable. Use a supported browser or the text tab.');try{recognition.start();voiceActive=true;$('#voiceStart').disabled=true;status('#transcript','Listening…');}catch{status('#transcript','Voice could not start. Check microphone permission.');}};
+function snapshot(kind,extra={}){return {id:uid(),kind,lead:{...lead},afterHours,lines:lines.map(l=>({...l})),bookings:bookings.map(b=>({...b,choices:[...b.choices]})),callbacks:callbacks.map(c=>({...c})),emailHistory:mailEvents.map(m=>`${titles[m.data.kind]}: ${Object.values(m.statuses).join(', ')}`).join('\n'),...extra};}
+function renderEmails(){const root=$('#emailEvents');root.replaceChildren();if(!mailEvents.length)root.append(text('p','No emails generated yet. End a chat or submit a demo action.'));for(const event of [...mailEvents].reverse()){const card=text('article','','entry');card.append(text('h3',titles[event.data.kind]));for(const mail of event.mails){const detail=document.createElement('details');detail.append(text('summary',`${mail.role}: ${mail.to||'Provider address not configured'} — ${event.statuses[mail.role]}`),text('h4',mail.subject),text('pre',mail.body));card.append(detail);}if(!event.busy&&Object.values(event.statuses).some(s=>s!=='accepted')){const retry=text('button','Retry unconfirmed recipients','action secondary');retry.onclick=()=>deliver(event);card.append(retry,text('small','An uncertain timeout can still have sent a message. Check your inbox before retrying.'));}root.append(card);}}
+async function deliver(event){if(event.busy)return false;event.busy=true;for(const mail of event.mails)if(event.statuses[mail.role]!=='accepted')event.statuses[mail.role]='sending';renderEmails();let ok=false;try{const response=await fetch('/api/email',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...event.data,website:$('#website').value,acceptedRoles:Object.keys(event.statuses).filter(k=>event.statuses[k]==='accepted')}),signal:AbortSignal.timeout(30000)});const result=await response.json();if(!response.ok)throw new Error(result.error||'Email request failed.');for(const s of result.statuses)event.statuses[s.role]=s.status;ok=result.ok;activity(titles[event.data.kind],ok?'All three messages accepted by sender':'Some messages need attention');}catch(error){for(const role of Object.keys(event.statuses))if(event.statuses[role]==='sending')event.statuses[role]='unconfirmed';activity('Email needs attention',error.message);event.error=error.message;}finally{event.busy=false;renderEmails();renderOwner();}if(ok&&event.onAccepted){event.onAccepted();event.onAccepted=null;}return ok;}
+async function queue(kind,extra={},onAccepted=null){const data=snapshot(kind,extra);const event={data,mails:buildEmails(data,observer),statuses:{business:'generated',customer:'generated',provider:'generated'},busy:false,onAccepted};mailEvents.push(event);renderEmails();await deliver(event);return event;}
+async function endChat(channel){if(!allowed()||channelBusy[channel])return;channelBusy[channel]=true;try{if(channel==='voice')await stopVoice();const end=lines.length;const selected=lines.slice(cursor[channel],end).filter(l=>l.channel===channel);if(!selected.some(l=>l.who==='Customer'))return toast('Add a customer question before ending the conversation.');cursor[channel]=end;const event=await queue(channel,{lines:selected});status(channel==='text'?'#textEmailStatus':'#voiceEmailStatus',Object.values(event.statuses).every(s=>s==='accepted')?'Three summary emails accepted by sender.':'Summary prepared. Check Email previews for individual statuses and retry.');}finally{channelBusy[channel]=false;}}
+$('#endTextChat').onclick=()=>endChat('text');$('#voiceStop').onclick=()=>endChat('voice');
+const timeValues=[];for(let h=10;h<=18;h++)for(const m of ['00','30'])if(h!==18||m==='00')timeValues.push(`${h}:${m}`);
+for(const id of ['time','timeB','timeC']){$('#'+id).replaceChildren();for(const value of timeValues){const o=text('option',value);o.value=value;$('#'+id).append(o);}}
+function today(){const p=new Intl.DateTimeFormat('en-CA',{timeZone:lead?.timezone||$('#timezone').value,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());return ['year','month','day'].map(k=>p.find(v=>v.type===k).value).join('-');}
+for(const id of ['date','dateB','dateC'])$('#'+id).min=today();
+$('#bookingMode').onchange=()=>{const choices=$('#bookingMode').value==='choices';$('#extraChoices').hidden=!choices;$('#dateB').required=choices;$('#dateC').required=choices;};
+function validSlot(slot){if(!/^\d{4}-\d{2}-\d{2}T(?:1[0-7]:(?:00|30)|18:00)$/.test(slot))return false;const date=slot.slice(0,10),d=new Date(date+'T12:00:00Z');return !isNaN(d)&&d.toISOString().slice(0,10)===date&&date>=today();}
+$('#bookingForm').addEventListener('submit',async e=>{e.preventDefault();if(!allowed())return;const mode=$('#bookingMode').value;const choices=[`${$('#date').value}T${$('#time').value}`];if(mode==='choices')choices.push(`${$('#dateB').value}T${$('#timeB').value}`,`${$('#dateC').value}T${$('#timeC').value}`);if(choices.some(s=>!validSlot(s))||new Set(choices).size!==choices.length)return status('#bookingStatus','Choose distinct valid dates/times from today onward.');const b={id:uid(),choices,selected:mode==='direct'?choices[0]:'',status:mode==='direct'?'Confirmed (demo)':'Awaiting owner selection',service:$('#bookingService').value};bookings.push(b);renderOwner();e.submitter.disabled=true;try{await queue(mode==='direct'?'booking':'choices',{service:b.service,choices,selected:b.selected});status('#bookingStatus',mode==='direct'?'Demo booking confirmed. Email statuses are in Email previews.':'Choices recorded. Switch to Owner view to select A, B or C.');}finally{e.submitter.disabled=false;}});
+$('#callbackForm').addEventListener('submit',async e=>{e.preventDefault();if(!allowed())return;const c={id:uid(),service:$('#callbackService').value,urgency:$('#callbackUrgency').value,phone:$('#callbackPhone').value.trim(),reason:$('#callbackReason').value.trim(),status:'Needs staff follow-up'};callbacks.push(c);renderOwner();e.submitter.disabled=true;try{await queue('callback',c);status('#callbackStatus','Callback captured and emails submitted. No phone call placed.');}finally{e.submitter.disabled=false;}});
+function button(label,action){const b=text('button',label,'action secondary');b.disabled=phase!=='active';b.onclick=async()=>{if(!allowed())return;b.disabled=true;try{await action();}finally{renderOwner();}};return b;}
+function downloadCalendar(b){const escape=s=>s.replace(/\\/g,'\\\\').replace(/\n/g,'\\n').replace(/,/g,'\\,').replace(/;/g,'\\;');const start=b.selected.replace(/[-:]/g,'')+'00';const d=new Date(b.selected+'Z');d.setUTCMinutes(d.getUTCMinutes()+30);const end=d.toISOString().slice(0,19).replace(/[-:]/g,'');const content=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Aileen//Demo//EN','BEGIN:VEVENT',`UID:${b.id}@aileen-demo`,`DTSTAMP:${new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d{3}/,'')}`,`DTSTART;TZID=${lead.timezone}:${start}`,`DTEND;TZID=${lead.timezone}:${end}`,`SUMMARY:${escape('DEMO ONLY — '+b.service)}`,'DESCRIPTION:Illustrative calendar entry. No actual appointment booked.','STATUS:TENTATIVE','END:VEVENT','END:VCALENDAR'].join('\r\n');const url=URL.createObjectURL(new Blob([content],{type:'text/calendar'}));const a=document.createElement('a');a.href=url;a.download='aileen-demo-booking.ics';a.click();URL.revokeObjectURL(url);}
+function renderOwner(){const summary=$('#ownerSummary');summary.replaceChildren(text('p',lead?`${lead.business} · ${lead.email} · ${afterHours?'After-hours routing':'Reception available'} · ${lead.timezone}`:'Start the demo to see session data.'));const er=$('#ownerEnquiries');er.replaceChildren();for(const q of enquiries){const n=text('div','','entry');n.append(text('strong',q.intent+' · '+q.urgency),text('p',q.question),text('p',`${q.route}: ${q.next}`));er.append(n);}for(const c of callbacks){const n=text('div','','entry');n.append(text('strong',`${c.service} · ${c.urgency}`),text('p',`${c.reason} · ${c.phone} · ${c.status}`),button('Mark reviewed (demo)',()=>{c.status='Reviewed in demo';}));er.append(n);}if(!enquiries.length&&!callbacks.length)er.append(text('p','No enquiries yet.'));
+ const br=$('#ownerBookings');br.replaceChildren();if(!bookings.length)br.append(text('p','No bookings yet.'));for(const b of bookings){const n=text('article','','entry');n.append(text('h3',b.service),text('p',b.status),text('p',b.selected?`${b.selected.replace('T',' ')} · ${lead.timezone}`:'Select one proposed time:'));if(!b.selected&&b.status!=='Cancelled (demo)')b.choices.forEach((slot,i)=>n.append(button(`Choose ${'ABC'[i]}: ${slot.replace('T',' ')}`,async()=>{b.selected=slot;b.status='Confirmed (demo)';await queue('booking',{service:b.service,selected:slot});})));
+ if(b.selected&&b.status!=='Cancelled (demo)'){n.append(button('Download demo calendar entry',()=>downloadCalendar(b)),button('Send example reminder',()=>queue('reminder',{service:b.service,selected:b.selected})),button('Cancel demo booking',async()=>{b.status='Cancelled (demo)';await queue('cancel',{service:b.service,selected:b.selected});}));const label=text('label','New date and time');const date=document.createElement('input');date.type='date';date.min=today();date.value=b.selected.slice(0,10);const time=document.createElement('select');for(const v of timeValues){const o=text('option',v);o.value=v;time.append(o);}time.value=b.selected.slice(11);label.append(date,time);n.append(label,button('Reschedule demo booking',async()=>{const slot=date.value+'T'+time.value;if(!validSlot(slot))return toast('Choose a valid future slot.');b.selected=slot;b.status='Rescheduled (demo)';await queue('reschedule',{service:b.service,selected:slot});}));}br.append(n);}}
+$('#summaryDraftButton').onclick=async()=>{if(!allowed())return;if(mailEvents.some(e=>e.busy)||channelBusy.text||channelBusy.voice)return toast('Wait for current event emails to finish.');phase='finishing';$('#summaryDraftButton').disabled=true;await stopVoice();await queue('demo',{},()=>{phase='finished';status('#gateStatus','Demo finished. You can review the owner view and email previews, or start a new session.');});phase='finished';$('#summaryDraftButton').textContent='Demo ended — review email status';status('#summaryStatus','Final summary generated. Check Email previews for all three statuses and retry any unconfirmed recipients.');renderOwner();};
+const packages=[['Conversion System','Captures interest without a conversational agent.','Demonstrated: lead form and email contact capture.','Production scope: conversion-focused pages, click-to-call, WhatsApp, trust signals and tracking.'],['Booking Engine','Converts an enquiry into an agreed time.','Demonstrated: direct demo booking, A/B/C owner selection, confirmations, calendar download, reschedule and cancel.','Illustrative: reminders and calendar entries. Production integration: real availability, calendar sync and scheduled reminders.'],['AI Revenue System','Answers and qualifies enquiries at any hour.','Demonstrated: scripted text, browser voice, urgency flags, after-hours routing and summaries.','Production integration: AI knowledge, live service routing, CRM/lead board and source reporting.'],['Advanced AI Revenue','Adds telephone reception and ongoing follow-up.','Illustrated: callback capture and owner follow-up review.','Requires deployment: inbound/outbound calls, missed-call text-back, multi-location escalation, quote follow-up, reactivation, reviews and revenue reporting.']];
+for(const p of packages){const card=text('article','','entry');card.append(text('h3',p[0]));for(const copy of p.slice(1))card.append(text('p',copy));$('#packageCards').append(card);}
+renderOwner();renderEmails();
+fetch('/api/health').then(r=>r.json()).then(h=>{observer=h.observerEmail||'';configured=h.emailConfigured;status('#summaryStatus',configured?'Email sender configured. Each event generates three role messages.':'Email sender needs configuration; email previews remain available.');if(h.version!==VERSION)status('#summaryStatus','Page and server versions differ. Refresh after deployment completes.');}).catch(()=>status('#summaryStatus','Sender status unavailable. Email previews remain available.'));

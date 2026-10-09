@@ -1,14 +1,9 @@
-# Aileen demo: three recipients per event
+# Aileen demo v2 — implementation pending user testing
 
-The visitor plays both roles. Their business email receives the owner summary or booking notification; their personal email receives the customer summary or confirmation. The demo provider receives a third copy.
+Preserves the original cream/green layout. Adds owner and email-preview tabs, floating navigation, four-package comparison, urgency and after-hours routing, direct/A-B-C demo booking, owner selection, downloadable illustrative calendar entry, reminder example, reschedule and cancel.
 
-Triggers: End text chat, End voice chat, Submit appointment request, Submit callback request, and Finish demo. The final demo summary includes text, voice and requested bookings/callbacks. Each trigger submits three separate messages when the addresses differ. Duplicate provider addresses are not sent another copy.
+Email events: end text chat, end voice conversation, booking choices, confirmation, callback, reminder example, reschedule, cancellation and final demo summary. Each sends business-owner, customer and provider role copies. Preview templates are shared between browser and Worker. Status is individual per role; accepted means provider acceptance, not inbox delivery. Retries skip acknowledged roles. In-memory server deduplication is best effort; ambiguous timeouts and Worker restarts can still duplicate a message.
 
-## Cloudflare Production runtime settings
-- AGENTMAIL_API_KEY (Secret): AgentMail sender key.
-- AGENTMAIL_INBOX_ID: ncai-hermes@agentmail.to.
-- DEMO_OBSERVER_EMAIL: provider's email for the third copy (required).
+Cloudflare Production: AGENTMAIL_API_KEY as Secret; AGENTMAIL_INBOX_ID=ncai-hermes@agentmail.to; DEMO_OBSERVER_EMAIL=nishant.chaudhary@ncaistrategypartners.com. keep_vars preserves dashboard configuration on deployment. Never add the API key to repository files.
 
-OWNER_EMAIL is obsolete. The owner's address comes from the visitor's business-email field. GitHub secrets do not automatically populate Cloudflare runtime settings.
-
-No real calendar, calls, CRM, or persistent storage. Booking confirmations explicitly describe a demonstration appointment request. Provider acceptance is reported, not claimed inbox delivery. Partial failures are shown; retrying a partial send may duplicate messages already accepted.
+Sessions are memory-only. Ending locks new activity and waits for voice input to finish before the final summary. Restart clears visible and internal session history. No real CRM, calls, calendar connection, automatic scheduled reminders or clinical advice. Responses are scripted; browser voice needs a compatible browser and permission. User-led functional and email tests remain pending.

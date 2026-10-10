@@ -1,9 +1,31 @@
-# Aileen demo v2 — implementation pending user testing
+# Aileen dental demo
 
-Preserves the original cream/green layout. Adds owner and email-preview tabs, floating navigation, four-package comparison, urgency and after-hours routing, direct/A-B-C demo booking, owner selection, downloadable illustrative calendar entry, reminder example, reschedule and cancel.
+This repository contains a clinic sales walkthrough for the NC AI Strategy Partners dental demo. It starts with clinic discovery, demonstrates scripted text chat, browser voice, callback and appointment flows, and ends with one tools feedback question. Patient and clinic activity is clearly labelled as demo data; the booking flow does not connect to a live calendar.
 
-Email events: end text chat, end voice conversation, booking choices, confirmation, callback, reminder example, reschedule, cancellation and final demo summary. Each sends business-owner, customer and provider role copies. Preview templates are shared between browser and Worker. Status is individual per role; accepted means provider acceptance, not inbox delivery. Retries skip acknowledged roles. In-memory server deduplication is best effort; ambiguous timeouts and Worker restarts can still duplicate a message.
+## Provider connections
 
-Cloudflare Production: AGENTMAIL_API_KEY as Secret; AGENTMAIL_INBOX_ID=ncai-hermes@agentmail.to; DEMO_OBSERVER_EMAIL=nishant.chaudhary@ncaistrategypartners.com. keep_vars preserves dashboard configuration on deployment. Never add the API key to repository files.
+The Cloudflare Worker source can send email through AgentMail when `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX_ID`, and `DEMO_OBSERVER_EMAIL` are configured. It can initiate an Aileen callback through Vapi when `VAPI_API_KEY`, `VAPI_ASSISTANT_ID`, and `VAPI_PHONE_NUMBER_ID` are configured. Credentials belong in the Cloudflare environment and must not be committed. A successful callback request means Vapi accepted the request; it does not prove that a call was answered.
 
-Sessions are memory-only. Ending locks new activity and waits for voice input to finish before the final summary. Restart clears visible and internal session history. No real CRM, calls, calendar connection, automatic scheduled reminders or clinical advice. Responses are scripted; browser voice needs a compatible browser and permission. User-led functional and email tests remain pending.
+Text replies are scripted. Browser voice uses the visitor's browser speech recognition and speech synthesis. There is no live calendar, CRM, durable session store, or automatic reminder service. Email provider acceptance is not proof of inbox delivery.
+
+## Checks
+
+Run the local safety tests with Node.js:
+
+```sh
+node --test tests/submission-safety.test.mjs
+```
+
+The app and Worker are browser modules. Syntax checks can be run with:
+
+```sh
+node --input-type=module --check < app.js
+node --input-type=module --check < worker.js
+node --input-type=module --check < email-templates.js
+```
+
+The submission guard blocks duplicate direct bookings, A/B/C confirmations, and callback requests after acceptance or an uncertain result. A definitive rejection can be retried. Uncertain provider outcomes require external reconciliation before retrying the same request.
+
+## Deployment
+
+Deployment is a separate step. These repository changes do not deploy or alter the live Cloudflare Worker.

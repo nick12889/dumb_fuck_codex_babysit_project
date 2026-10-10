@@ -13,7 +13,7 @@ Text replies are scripted. Browser voice uses the visitor's browser speech recog
 Run the local safety tests with Node.js:
 
 ```sh
-node --test tests/submission-safety.test.mjs
+node --test submission-safety.test.mjs
 ```
 
 The app and Worker are browser modules. Syntax checks can be run with:
